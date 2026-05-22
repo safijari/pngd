@@ -9,7 +9,7 @@ description = "Byte-split depth PNG: lossless single-file container for uint16 d
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Simbe Robotics" }]
+authors = [{ name = "Jariullah Safi" }]
 keywords = ["depth", "png", "realsense", "image", "uint16", "compression"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -28,8 +28,8 @@ dependencies = [
 test = ["pytest>=7"]
 
 [project.urls]
-Documentation = "https://github.com/simberobotics/pngd/blob/main/docs/format.md"
-Source = "https://github.com/simberobotics/pngd"
+Documentation = "https://github.com/safijari/pngd/blob/main/docs/format.md"
+Source = "https://github.com/safijari/pngd"
 
 [tool.setuptools.packages.find]
 where = ["src"]
