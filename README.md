@@ -81,6 +81,41 @@ side-by-side files remain fine.
 - NumPy 1.20+
 - Pillow 9.0+
 
+## Releasing
+
+Releases are cut by publishing a GitHub Release; the
+[`Release`](.github/workflows/release.yml) workflow builds an sdist
+and wheel and publishes them to PyPI via trusted publishing (OIDC),
+so no API tokens are stored in the repo.
+
+To cut a release:
+
+1. Bump `version` in `pyproject.toml` (and `__version__` in
+   `src/pngd/__init__.py`) and commit.
+2. Create a GitHub Release whose **tag** is `vX.Y.Z` (matching the
+   `pyproject.toml` version exactly). The release workflow refuses to
+   publish if the two disagree.
+3. The workflow builds, runs `twine check`, and uploads to PyPI.
+
+### One-time PyPI setup
+
+Before the first release, configure the PyPI project as a Trusted
+Publisher (no API token needed):
+
+- Go to <https://pypi.org/manage/account/publishing/> and add a
+  **pending** trusted publisher with:
+  - PyPI Project Name: `pngd`
+  - Owner: `safijari`
+  - Repository name: `pngd`
+  - Workflow name: `release.yml`
+  - Environment name: `pypi`
+- In the GitHub repo, create an Environment named `pypi`
+  (Settings → Environments → New environment). Optionally add
+  required reviewers so a human has to approve each publish.
+
+After the first successful publish PyPI converts the pending publisher
+to a normal one automatically.
+
 ## License
 
 MIT
