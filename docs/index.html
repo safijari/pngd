@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PNGD / PNG Depth Viewer</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1115;
+      --panel: #171a21;
+      --text: #e8ecf1;
+      --muted: #a8b1c0;
+      --accent: #6ca8ff;
+      --danger: #ff7b7b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      gap: 14px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid #2a3140;
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .dropzone {
+      border: 2px dashed #3b4560;
+      border-radius: 10px;
+      text-align: center;
+      padding: 28px 16px;
+      color: var(--muted);
+      cursor: pointer;
+      transition: 0.2s border-color, 0.2s background;
+    }
+    .dropzone.drag {
+      border-color: var(--accent);
+      background: #1a2232;
+      color: #d7e5ff;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .status {
+      font-size: 0.95rem;
+      color: var(--muted);
+    }
+    .error { color: var(--danger); }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+    @media (min-width: 1020px) {
+      .grid { grid-template-columns: 1fr 1fr; }
+    }
+    #depthCanvas {
+      width: 100%;
+      height: auto;
+      border: 1px solid #2a3140;
+      border-radius: 8px;
+      image-rendering: pixelated;
+      background: #000;
+      display: block;
+    }
+    #view3d {
+      width: 100%;
+      height: 500px;
+      border: 1px solid #2a3140;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.9rem;
+    }
+    .hint { color: var(--muted); font-size: 0.9rem; }
+    input[type="checkbox"] { transform: translateY(1px); }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <div id="dropzone" class="dropzone">
+        Drop a <span class="mono">.png</span> or <span class="mono">.pngd</span> file here, or click to select.
+      </div>
+      <input id="fileInput" type="file" accept=".png,.pngd,image/png" hidden />
+      <div class="row" style="margin-top: 12px; gap: 8px;">
+        <div id="status" class="status">Waiting for file…</div>
+        <label class="status"><input id="metersToggle" type="checkbox" checked /> Display depth in meters (/1000)</label>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <div class="row" style="margin-bottom: 8px;">
+          <strong>2D Colormap</strong>
+          <div id="hoverInfo" class="mono hint">hover over image for depth</div>
+        </div>
+        <canvas id="depthCanvas" width="640" height="360"></canvas>
+      </article>
+
+      <article class="card">
+        <div class="row" style="margin-bottom: 8px;">
+          <strong>3D View</strong>
+          <div class="hint">Drag to orbit, wheel to zoom</div>
+        </div>
+        <div id="view3d"></div>
+      </article>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+  <script type="module">
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.167.1/build/three.module.js';
+    import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.167.1/examples/jsm/controls/OrbitControls.js';
+
+    const PNG_SIG = new Uint8Array([137,80,78,71,13,10,26,10]);
+    const PNGD_SIG = new Uint8Array([137,80,78,71,68,13,10,26,10]);
+
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const statusEl = document.getElementById('status');
+    const hoverInfoEl = document.getElementById('hoverInfo');
+    const metersToggle = document.getElementById('metersToggle');
+    const canvas = document.getElementById('depthCanvas');
+    const ctx = canvas.getContext('2d');
+
+    const state = {
+      fileName: '',
+      type: '',
+      width: 0,
+      height: 0,
+      depth: null,
+      min: 0,
+      max: 0,
+      renderer: null,
+      scene: null,
+      camera: null,
+      controls: null,
+      mesh: null,
+      animating: false,
+    };
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.className = isError ? 'status error' : 'status';
+    }
+
+    function startsWith(data, sig) {
+      if (data.length < sig.length) return false;
+      for (let i = 0; i < sig.length; i++) if (data[i] !== sig[i]) return false;
+      return true;
+    }
+
+    function readU32BE(bytes, off) {
+      return (bytes[off] << 24) | (bytes[off + 1] << 16) | (bytes[off + 2] << 8) | bytes[off + 3];
+    }
+
+    function paeth(a, b, c) {
+      const p = a + b - c;
+      const pa = Math.abs(p - a);
+      const pb = Math.abs(p - b);
+      const pc = Math.abs(p - c);
+      return pa <= pb && pa <= pc ? a : (pb <= pc ? b : c);
+    }
+
+    function turboColor(t) {
+      t = Math.max(0, Math.min(1, t));
+      const r = 34.61 + t * (1172.33 + t * (-10793.56 + t * (33300.12 + t * (-38394.49 + t * 14825.05))));
+      const g = 23.31 + t * (557.33 + t * (1225.33 + t * (-3574.96 + t * (1073.77 + t * 707.56))));
+      const b = 27.2 + t * (3211.1 + t * (-15327.97 + t * (27814.0 + t * (-22569.18 + t * 6838.66))));
+      return [Math.max(0, Math.min(255, r)) | 0, Math.max(0, Math.min(255, g)) | 0, Math.max(0, Math.min(255, b)) | 0];
+    }
+
+    function parsePngDepth(data) {
+      if (!startsWith(data, PNG_SIG)) throw new Error('Not a PNG file');
+      let off = 8;
+      let width = 0, height = 0, bitDepth = 0, colorType = 0, interlace = 0;
+      const idatParts = [];
+
+      while (off + 8 <= data.length) {
+        const len = readU32BE(data, off); off += 4;
+        const type = String.fromCharCode(data[off], data[off + 1], data[off + 2], data[off + 3]); off += 4;
+        if (off + len + 4 > data.length) throw new Error('PNG chunk exceeds file length');
+        const chunk = data.subarray(off, off + len);
+        off += len;
+        off += 4;
+
+        if (type === 'IHDR') {
+          width = readU32BE(chunk, 0);
+          height = readU32BE(chunk, 4);
+          bitDepth = chunk[8];
+          colorType = chunk[9];
+          interlace = chunk[12];
+        } else if (type === 'IDAT') {
+          idatParts.push(chunk);
+        } else if (type === 'IEND') {
+          break;
+        }
+      }
+
+      if (!width || !height) throw new Error('PNG missing IHDR');
+      if (interlace !== 0) throw new Error('Interlaced PNG not supported in this viewer');
+      const channels = {0:1, 2:3, 4:2, 6:4}[colorType];
+      if (!channels) throw new Error(`Unsupported PNG color type: ${colorType}`);
+      if (bitDepth !== 8 && bitDepth !== 16) throw new Error(`Unsupported PNG bit depth: ${bitDepth}`);
+
+      let totalIdat = 0;
+      for (const p of idatParts) totalIdat += p.length;
+      const idat = new Uint8Array(totalIdat);
+      let pOff = 0;
+      for (const p of idatParts) {
+        idat.set(p, pOff);
+        pOff += p.length;
+      }
+
+      const raw = window.pako.inflate(idat);
+      const bpp = channels * (bitDepth / 8);
+      const rowBytes = width * bpp;
+      const expected = height * (1 + rowBytes);
+      if (raw.length < expected) throw new Error('PNG data is truncated');
+
+      const decoded = new Uint8Array(height * rowBytes);
+      let inOff = 0;
+      for (let y = 0; y < height; y++) {
+        const f = raw[inOff++];
+        const rowStart = y * rowBytes;
+        for (let x = 0; x < rowBytes; x++) {
+          const left = x >= bpp ? decoded[rowStart + x - bpp] : 0;
+          const up = y > 0 ? decoded[rowStart - rowBytes + x] : 0;
+          const upLeft = (y > 0 && x >= bpp) ? decoded[rowStart - rowBytes + x - bpp] : 0;
+          const cur = raw[inOff++];
+          let val;
+          switch (f) {
+            case 0: val = cur; break;
+            case 1: val = (cur + left) & 255; break;
+            case 2: val = (cur + up) & 255; break;
+            case 3: val = (cur + ((left + up) >> 1)) & 255; break;
+            case 4: val = (cur + paeth(left, up, upLeft)) & 255; break;
+            default: throw new Error(`Unsupported PNG filter ${f}`);
+          }
+          decoded[rowStart + x] = val;
+        }
+      }
+
+      const depth = new Uint16Array(width * height);
+      for (let y = 0; y < height; y++) {
+        const rowStart = y * rowBytes;
+        for (let x = 0; x < width; x++) {
+          const px = rowStart + x * bpp;
+          let d = 0;
+          if (colorType === 0) {
+            d = bitDepth === 16 ? ((decoded[px] << 8) | decoded[px + 1]) : decoded[px] * 257;
+          } else if (colorType === 4) {
+            d = bitDepth === 16 ? ((decoded[px] << 8) | decoded[px + 1]) : decoded[px] * 257;
+          } else if (colorType === 2 || colorType === 6) {
+            let r, g, b;
+            if (bitDepth === 16) {
+              r = (decoded[px] << 8) | decoded[px + 1];
+              g = (decoded[px + 2] << 8) | decoded[px + 3];
+              b = (decoded[px + 4] << 8) | decoded[px + 5];
+            } else {
+              r = decoded[px] * 257;
+              g = decoded[px + 1] * 257;
+              b = decoded[px + 2] * 257;
+            }
+            d = ((r + g + b) / 3) | 0;
+          }
+          depth[y * width + x] = d;
+        }
+      }
+
+      return { width, height, depth };
+    }
+
+    function decodePngd(data) {
+      if (!startsWith(data, PNGD_SIG)) throw new Error('Not a PNGD file');
+      if (data.length < 21) throw new Error('PNGD header truncated');
+
+      const version = data[9];
+      const flags = data[10];
+      const reserved = (data[11] << 8) | data[12];
+      const hiLen = readU32BE(data, 13) >>> 0;
+      const loLen = readU32BE(data, 17) >>> 0;
+      if (version !== 1) throw new Error(`Unsupported PNGD version: ${version}`);
+      if (flags !== 0 || reserved !== 0) throw new Error('Invalid PNGD v1 header fields');
+
+      const hiStart = 21;
+      const loStart = hiStart + hiLen;
+      const loEnd = loStart + loLen;
+      if (loEnd > data.length) throw new Error('PNGD payload truncated');
+
+      const hiPng = parsePngDepth(data.subarray(hiStart, loStart));
+      const loPng = parsePngDepth(data.subarray(loStart, loEnd));
+      if (hiPng.width !== loPng.width || hiPng.height !== loPng.height) {
+        throw new Error('PNGD hi/lo image dimensions do not match');
+      }
+
+      const n = hiPng.width * hiPng.height;
+      const depth = new Uint16Array(n);
+      for (let i = 0; i < n; i++) {
+        depth[i] = ((hiPng.depth[i] & 0xFF) << 8) | (loPng.depth[i] & 0xFF);
+      }
+      return { width: hiPng.width, height: hiPng.height, depth };
+    }
+
+    function normalizeStats(depth) {
+      let min = Infinity;
+      let max = 0;
+      for (let i = 0; i < depth.length; i++) {
+        const d = depth[i];
+        if (d > 0 && d < min) min = d;
+        if (d > max) max = d;
+      }
+      if (!Number.isFinite(min)) min = 0;
+      if (max <= min) max = min + 1;
+      return { min, max };
+    }
+
+    function render2D() {
+      if (!state.depth) return;
+      canvas.width = state.width;
+      canvas.height = state.height;
+      const { min, max, depth } = state;
+      const img = ctx.createImageData(state.width, state.height);
+      for (let i = 0; i < depth.length; i++) {
+        const d = depth[i];
+        const o = i * 4;
+        if (d === 0) {
+          img.data[o] = 0;
+          img.data[o + 1] = 0;
+          img.data[o + 2] = 0;
+          img.data[o + 3] = 255;
+          continue;
+        }
+        const t = Math.max(0, Math.min(1, (d - min) / (max - min)));
+        const [r, g, b] = turboColor(t);
+        img.data[o] = r;
+        img.data[o + 1] = g;
+        img.data[o + 2] = b;
+        img.data[o + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+      hoverInfoEl.textContent = 'hover over image for depth';
+    }
+
+    function init3D() {
+      const holder = document.getElementById('view3d');
+      if (!state.renderer) {
+        state.renderer = new THREE.WebGLRenderer({ antialias: true });
+        state.renderer.setPixelRatio(window.devicePixelRatio || 1);
+        holder.appendChild(state.renderer.domElement);
+
+        state.scene = new THREE.Scene();
+        state.scene.background = new THREE.Color(0x000000);
+
+        state.camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000);
+        state.controls = new OrbitControls(state.camera, state.renderer.domElement);
+        state.controls.enableDamping = true;
+
+        const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+        const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+        dir.position.set(0.5, 1, 1);
+        state.scene.add(ambient, dir);
+      }
+
+      const w = holder.clientWidth || 500;
+      const h = holder.clientHeight || 500;
+      state.renderer.setSize(w, h, false);
+      state.camera.aspect = w / h;
+      state.camera.updateProjectionMatrix();
+
+      if (!state.animating) {
+        state.animating = true;
+        const loop = () => {
+          if (!state.animating) return;
+          state.controls.update();
+          state.renderer.render(state.scene, state.camera);
+          requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
+      }
+    }
+
+    function rebuild3D() {
+      if (!state.depth) return;
+      init3D();
+
+      if (state.mesh) {
+        state.scene.remove(state.mesh);
+        state.mesh.geometry.dispose();
+        state.mesh.material.dispose();
+        state.mesh = null;
+      }
+
+      const width = state.width;
+      const height = state.height;
+      const depth = state.depth;
+      const { min, max } = state;
+      const useMeters = metersToggle.checked;
+      const scale = useMeters ? 1000 : 1;
+      const maxPts = 90000;
+      const step = Math.max(1, Math.ceil(Math.sqrt((width * height) / maxPts)));
+      const fx = Math.max(width, height) * 0.9;
+      const fy = fx;
+      const cx = width * 0.5;
+      const cy = height * 0.5;
+
+      let count = 0;
+      for (let y = 0; y < height; y += step) {
+        const row = y * width;
+        for (let x = 0; x < width; x += step) {
+          if (depth[row + x] > 0) count++;
+        }
+      }
+
+      const positions = new Float32Array(count * 3);
+      const colors = new Float32Array(count * 3);
+      let maxZ = 0;
+      let i = 0;
+      for (let y = 0; y < height; y += step) {
+        const row = y * width;
+        for (let x = 0; x < width; x += step) {
+          const d = depth[row + x];
+          if (d <= 0) continue;
+          const z = d / scale;
+          const px = ((x - cx) / fx) * z;
+          const py = -((y - cy) / fy) * z;
+
+          positions[i * 3] = px;
+          positions[i * 3 + 1] = py;
+          positions[i * 3 + 2] = z;
+
+          const t = Math.max(0, Math.min(1, (d - min) / (max - min)));
+          const [r, g, b] = turboColor(t);
+          colors[i * 3] = r / 255;
+          colors[i * 3 + 1] = g / 255;
+          colors[i * 3 + 2] = b / 255;
+
+          if (z > maxZ) maxZ = z;
+          i++;
+        }
+      }
+
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+      const pointSize = Math.max(0.002, maxZ / 500);
+      const mat = new THREE.PointsMaterial({ size: pointSize, vertexColors: true, sizeAttenuation: true });
+      state.mesh = new THREE.Points(geom, mat);
+      state.scene.add(state.mesh);
+
+      const far = Math.max(10, maxZ * 6);
+      state.camera.near = 0.01;
+      state.camera.far = far;
+      state.camera.fov = 60;
+      state.camera.position.set(0, 0, Math.max(1, maxZ * 1.4));
+      state.camera.updateProjectionMatrix();
+      state.controls.target.set(0, 0, maxZ * 0.5);
+      state.controls.update();
+    }
+
+    function formatDepth(raw) {
+      if (!metersToggle.checked) return `${raw} (raw uint16)`;
+      return `${(raw / 1000).toFixed(4)} m (${raw} raw)`;
+    }
+
+    function updateHover(ev) {
+      if (!state.depth) return;
+      const rect = canvas.getBoundingClientRect();
+      const sx = canvas.width / rect.width;
+      const sy = canvas.height / rect.height;
+      const x = Math.floor((ev.clientX - rect.left) * sx);
+      const y = Math.floor((ev.clientY - rect.top) * sy);
+      if (x < 0 || y < 0 || x >= state.width || y >= state.height) {
+        hoverInfoEl.textContent = 'hover over image for depth';
+        return;
+      }
+      const raw = state.depth[y * state.width + x];
+      hoverInfoEl.textContent = `x=${x}, y=${y}, depth=${formatDepth(raw)}`;
+    }
+
+    canvas.addEventListener('mousemove', updateHover);
+    canvas.addEventListener('mouseleave', () => { hoverInfoEl.textContent = 'hover over image for depth'; });
+    metersToggle.addEventListener('change', () => {
+      if (state.depth) {
+        rebuild3D();
+        hoverInfoEl.textContent = 'hover over image for depth';
+      }
+    });
+
+    function onResize() {
+      if (!state.renderer || !state.camera) return;
+      const holder = document.getElementById('view3d');
+      const w = holder.clientWidth || 500;
+      const h = holder.clientHeight || 500;
+      state.renderer.setSize(w, h, false);
+      state.camera.aspect = w / h;
+      state.camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', onResize);
+
+    async function handleFile(file) {
+      if (!file) return;
+      setStatus(`Loading ${file.name}...`);
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let parsed;
+        let kind;
+
+        if (startsWith(bytes, PNGD_SIG)) {
+          kind = 'PNGD';
+          parsed = decodePngd(bytes);
+        } else if (startsWith(bytes, PNG_SIG)) {
+          kind = 'PNG';
+          parsed = parsePngDepth(bytes);
+        } else {
+          throw new Error('Unsupported file. Drop a .png or .pngd depth map.');
+        }
+
+        state.fileName = file.name;
+        state.type = kind;
+        state.width = parsed.width;
+        state.height = parsed.height;
+        state.depth = parsed.depth;
+        const stats = normalizeStats(parsed.depth);
+        state.min = stats.min;
+        state.max = stats.max;
+
+        render2D();
+        rebuild3D();
+
+        setStatus(`${file.name}: ${kind} | ${state.width}x${state.height} | nonzero range ${state.min}..${state.max} raw`);
+      } catch (err) {
+        console.error(err);
+        setStatus(`Failed: ${err.message || err}`, true);
+      }
+    }
+
+    dropzone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => handleFile(fileInput.files?.[0]));
+
+    dropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzone.classList.add('drag');
+    });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('drag');
+      handleFile(e.dataTransfer?.files?.[0]);
+    });
+
+    init3D();
+  </script>
+</body>
+</html>
