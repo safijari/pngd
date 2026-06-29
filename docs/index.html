@@ -96,10 +96,10 @@
 <body>
   <main class="wrap">
     <section class="card">
-      <div id="dropzone" class="dropzone">
+      <label id="dropzone" class="dropzone" for="fileInput">
         Drop a <span class="mono">.png</span> or <span class="mono">.pngd</span> file here, or click to select.
-      </div>
-      <input id="fileInput" type="file" accept=".png,.pngd,image/png" hidden />
+      </label>
+      <input id="fileInput" type="file" accept=".png,.pngd,image/png" style="position:absolute;width:0;height:0;opacity:0;pointer-events:none" />
       <div class="row" style="margin-top: 12px; gap: 8px;">
         <div id="status" class="status">Waiting for file…</div>
         <label class="status"><input id="metersToggle" type="checkbox" checked /> Display depth in meters (/1000)</label>
@@ -557,14 +557,21 @@
       }
     }
 
-    dropzone.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => handleFile(fileInput.files?.[0]));
 
+    dropzone.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      dropzone.classList.add('drag');
+    });
     dropzone.addEventListener('dragover', (e) => {
       e.preventDefault();
       dropzone.classList.add('drag');
     });
-    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+    dropzone.addEventListener('dragleave', (e) => {
+      if (!dropzone.contains(e.relatedTarget)) {
+        dropzone.classList.remove('drag');
+      }
+    });
     dropzone.addEventListener('drop', (e) => {
       e.preventDefault();
       dropzone.classList.remove('drag');
