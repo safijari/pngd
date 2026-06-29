@@ -299,15 +299,15 @@
 
       const version = data[9];
       const flags = data[10];
-      const reservedField = (data[11] << 8) | data[12];
-      const highBytesPngLength = readU32BE(data, 13) >>> 0;
-      const lowBytesPngLength = readU32BE(data, 17) >>> 0;
+      const reserved = (data[11] << 8) | data[12];
+      const highBytesImageLength = readU32BE(data, 13) >>> 0;
+      const lowBytesImageLength = readU32BE(data, 17) >>> 0;
       if (version !== 1) throw new Error(`Unsupported PNGD version: ${version}`);
-      if (flags !== 0 || reservedField !== 0) throw new Error('Invalid PNGD v1 header fields');
+      if (flags !== 0 || reserved !== 0) throw new Error('Invalid PNGD v1 header fields');
 
       const hiStart = 21;
-      const loStart = hiStart + highBytesPngLength;
-      const loEnd = loStart + lowBytesPngLength;
+      const loStart = hiStart + highBytesImageLength;
+      const loEnd = loStart + lowBytesImageLength;
       if (loEnd > data.length) throw new Error('PNGD payload truncated');
 
       const hiPng = parsePngDepth(data.subarray(hiStart, loStart));
@@ -326,14 +326,14 @@
 
     function normalizeStats(depth) {
       let min = Infinity;
-      let max = 0;
+      let max = -Infinity;
       for (let i = 0; i < depth.length; i++) {
         const d = depth[i];
         if (d > 0 && d < min) min = d;
         if (d > max) max = d;
       }
       if (!Number.isFinite(min)) min = 0;
-      if (max <= min) max = min + 1;
+      if (!Number.isFinite(max) || max <= min) max = min + 1;
       return { min, max };
     }
 
