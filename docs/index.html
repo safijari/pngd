@@ -135,6 +135,7 @@
     const FALLBACK_VIEW_SIZE = 500;
     const MAX_POINT_CLOUD_SIZE = 90000;
     const POINT_SIZE_DIVISOR = 500;
+    const MIN_POINT_SIZE = 0.002;
 
     const dropzone = document.getElementById('dropzone');
     const fileInput = document.getElementById('fileInput');
@@ -225,17 +226,17 @@
       if (bitDepth !== 8 && bitDepth !== 16) throw new Error(`Unsupported PNG bit depth: ${bitDepth}`);
 
       let totalIdat = 0;
-      for (const p of idatParts) totalIdat += p.length;
+      for (const part of idatParts) totalIdat += part.length;
       const idat = new Uint8Array(totalIdat);
-      let pOff = 0;
-      for (const p of idatParts) {
-        idat.set(p, pOff);
-        pOff += p.length;
+      let partOffset = 0;
+      for (const part of idatParts) {
+        idat.set(part, partOffset);
+        partOffset += part.length;
       }
 
       const raw = window.pako.inflate(idat);
-      const bpp = channels * (bitDepth / 8);
-      const rowBytes = width * bpp;
+      const bytesPerPixel = channels * (bitDepth / 8);
+      const rowBytes = width * bytesPerPixel;
       const expected = height * (1 + rowBytes);
       if (raw.length < expected) throw new Error('PNG data is truncated');
 
@@ -245,9 +246,9 @@
         const f = raw[inOff++];
         const rowStart = y * rowBytes;
         for (let x = 0; x < rowBytes; x++) {
-          const left = x >= bpp ? decoded[rowStart + x - bpp] : 0;
+          const left = x >= bytesPerPixel ? decoded[rowStart + x - bytesPerPixel] : 0;
           const up = y > 0 ? decoded[rowStart - rowBytes + x] : 0;
-          const upLeft = (y > 0 && x >= bpp) ? decoded[rowStart - rowBytes + x - bpp] : 0;
+          const upLeft = (y > 0 && x >= bytesPerPixel) ? decoded[rowStart - rowBytes + x - bytesPerPixel] : 0;
           const cur = raw[inOff++];
           let val;
           switch (f) {
@@ -266,7 +267,7 @@
       for (let y = 0; y < height; y++) {
         const rowStart = y * rowBytes;
         for (let x = 0; x < width; x++) {
-          const px = rowStart + x * bpp;
+          const px = rowStart + x * bytesPerPixel;
           let d = 0;
           if (colorType === 0) {
             d = bitDepth === 16 ? ((decoded[px] << 8) | decoded[px + 1]) : decoded[px] * 257;
@@ -298,15 +299,15 @@
 
       const version = data[9];
       const flags = data[10];
-      const reserved = (data[11] << 8) | data[12];
-      const hiLen = readU32BE(data, 13) >>> 0;
-      const loLen = readU32BE(data, 17) >>> 0;
+      const reservedField = (data[11] << 8) | data[12];
+      const highBytesPngLength = readU32BE(data, 13) >>> 0;
+      const lowBytesPngLength = readU32BE(data, 17) >>> 0;
       if (version !== 1) throw new Error(`Unsupported PNGD version: ${version}`);
-      if (flags !== 0 || reserved !== 0) throw new Error('Invalid PNGD v1 header fields');
+      if (flags !== 0 || reservedField !== 0) throw new Error('Invalid PNGD v1 header fields');
 
       const hiStart = 21;
-      const loStart = hiStart + hiLen;
-      const loEnd = loStart + loLen;
+      const loStart = hiStart + highBytesPngLength;
+      const loEnd = loStart + lowBytesPngLength;
       if (loEnd > data.length) throw new Error('PNGD payload truncated');
 
       const hiPng = parsePngDepth(data.subarray(hiStart, loStart));
@@ -419,10 +420,10 @@
       const useMeters = metersToggle.checked;
       const scale = useMeters ? 1000 : 1;
       const step = Math.max(1, Math.ceil(Math.sqrt((width * height) / MAX_POINT_CLOUD_SIZE)));
-      const fx = Math.max(width, height) * 0.9;
-      const fy = fx;
-      const cx = width * 0.5;
-      const cy = height * 0.5;
+      const focalLengthX = Math.max(width, height) * 0.9;
+      const focalLengthY = focalLengthX;
+      const principalPointX = width * 0.5;
+      const principalPointY = height * 0.5;
 
       let count = 0;
       for (let y = 0; y < height; y += step) {
@@ -442,8 +443,8 @@
           const d = depth[row + x];
           if (d <= 0) continue;
           const z = d / scale;
-          const px = ((x - cx) / fx) * z;
-          const py = -((y - cy) / fy) * z;
+          const px = ((x - principalPointX) / focalLengthX) * z;
+          const py = -((y - principalPointY) / focalLengthY) * z;
 
           positions[i * 3] = px;
           positions[i * 3 + 1] = py;
@@ -464,7 +465,7 @@
       geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
       geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-      const pointSize = Math.max(0.002, maxZ / POINT_SIZE_DIVISOR);
+      const pointSize = Math.max(MIN_POINT_SIZE, maxZ / POINT_SIZE_DIVISOR);
       const mat = new THREE.PointsMaterial({ size: pointSize, vertexColors: true, sizeAttenuation: true });
       state.mesh = new THREE.Points(geom, mat);
       state.scene.add(state.mesh);
